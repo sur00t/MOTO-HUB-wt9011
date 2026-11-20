@@ -1,0 +1,12 @@
+# Gradle / Android build output
+build/
+.gradle/
+local.properties
+*.iml
+.idea/
+
+# Local preservation copy of the previous module tree
+backup-0.1.0/
+
+# OS noise
+.DS_Store
