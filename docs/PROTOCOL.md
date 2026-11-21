@@ -169,11 +169,15 @@ writes and only accepts settings for ten seconds after the unlock command.
 | --- | --- | --- |
 | Unlock settings | `FF AA 69 88 B5` | mandatory before any settings write; valid for 10 s |
 | Output content | `FF AA 96 00 00` | acceleration + angular rate + angle |
-| Output rate 20 Hz | `FF AA 03 07 00` | used by the setup block |
+| Output rate 100 Hz | `FF AA 03 09 00` | used by the setup block |
+| Output rate 20 Hz | `FF AA 03 07 00` | defined for reference/tests |
 | Output rate 10 Hz | `FF AA 03 06 00` | device default; defined for reference/tests |
-| Bandwidth 42 Hz | `FF AA 1F 03 00` | at least twice the 20 Hz output rate |
+| Bandwidth 256 Hz | `FF AA 1F 00 00` | used by the setup block |
+| Bandwidth 188 Hz | `FF AA 1F 01 00` | reference; below 2× the 100 Hz rate |
+| Bandwidth 42 Hz | `FF AA 1F 03 00` | defined for reference/tests |
 | 9-axis algorithm | `FF AA 24 00 00` | the only mode with an absolute heading |
-| Horizontal install | `FF AA 23 00 00` | Z-up; the vertical install mode is never used |
+| Horizontal install | `FF AA 23 00 00` | Z-up; used for every flat mount |
+| Vertical install | `FF AA 23 01 00` | printed +Y arrow up; used for every on-edge mount |
 | Save to flash | `FF AA 00 00 00` | persists the settings |
 | Read register | `FF AA 27 <reg low> <reg high>` | answered by a `0x71` frame |
 
@@ -184,10 +188,10 @@ writes and only accepts settings for ten seconds after the unlock command.
 ```
 FF AA 69 88 B5   unlock
 FF AA 96 00 00   output = acceleration + angular rate + angle
-FF AA 03 07 00   20 Hz
-FF AA 1F 03 00   42 Hz bandwidth
+FF AA 03 09 00   100 Hz
+FF AA 1F 00 00   256 Hz bandwidth
 FF AA 24 00 00   9-axis algorithm
-FF AA 23 00 00   horizontal install
+FF AA 23 00 00   horizontal install (23 01 00 for an on-edge mount)
 FF AA 00 00 00   save
 ```
 
@@ -249,67 +253,50 @@ for the internal sample timestamp and passes the original nanoseconds to the mot
 
 ## 6. Axis and sign model
 
-The datasheet's axis diagram is left-handed, and the vendor's own apps disagree about which way is
-forward. The module therefore treats the axis mapping as **empirical** and settles it with six bench
-tests. All of the mapping is in `Wt9011Axes` in `Wt9011Packet.kt`.
+The vendor's diagram is a normal right-handed triad: printed +X is to the right when the label is
+readable, +Y runs along the long axis towards the logo end, +Z comes out of the label. The default
+mount uses it directly: **+Y forward, +X right, +Z up**. The vendor's own apps still disagree about
+which way is forward, so the signs are **empirical** and settled with six bench tests.
 
-### 6.1 The two candidate conventions
+### 6.1 The default decode
 
-One boolean, `LEAN_IS_PITCH`, selects the whole triad, including the gyro axes:
+All of this is in `decodeSample` in `Wt9011Packet.kt`. It produces the packet in the default frame,
+before the mount is applied:
 
-| | Candidate B (`LEAN_IS_PITCH = false`, current default) | Candidate A (`LEAN_IS_PITCH = true`) |
+| Packet field | Wire source | Formula |
 | --- | --- | --- |
-| Positive X | forward | right |
-| Positive Y | left | forward |
-| Lean field | Roll (bytes 14-15) | Pitch (bytes 16-17) |
-| Nose field | Pitch (bytes 16-17) | Roll (bytes 14-15) |
-| Forward g | AX | AY |
-| Rightward g | -AY | AX |
-| Forward rate (roll) | WX | WY |
-| Left rate (pitch) | WY | -WX |
-| Up rate (yaw) | WZ | WZ |
+| `leanDeg` | Pitch (bytes 16-17) | `raw.pitchDeg * LEAN_SIGN` |
+| `pitchDeg` | Roll (bytes 14-15) | `raw.rollDeg * PITCH_SIGN` |
+| `yawDeg` | Yaw (bytes 18-19) | `wrap180(raw.yawDeg * YAW_SIGN)` |
+| `longG` | AY | `raw.ay * ACC_SIGN` |
+| `latG` | AX | `raw.ax * ACC_SIGN` |
+| `vertG` | AZ | `raw.az * ACC_SIGN` |
+| `rollRate` | WY | `raw.wy * GYRO_SIGN * (π/180)` |
+| `pitchRate` | WX | `-raw.wx * GYRO_SIGN * (π/180)` |
+| `yawRate` | WZ | `raw.wz * GYRO_SIGN * (π/180)` |
 
-The parser applies this mapping in `decodeSample`:
-
-- `leanField` and `noseField` are chosen from Roll/Pitch.
-- `forwardAxis` and `rightAxis` are chosen from AX/AY.
-- `forwardRate` and `leftRate` are chosen from WX/WY.
-- `rightAxis` is negated for candidate B because the packet's lateral g is right-positive while the
-  sensor's +Y is left.
-
-The rate vector is in the motorcycle frame: x forward, y left, z up. Its components are radians per
-second:
-
-```
-rollRate  = forwardRate * GYRO_SIGN * (π / 180)
-pitchRate = leftRate    * GYRO_SIGN * (π / 180)
-yawRate   = raw.wz      * GYRO_SIGN * (π / 180)
-```
+Rotating about printed +Y leans the bike right, so roll rate is WY. Nose-down is the negative of a
+right-handed turn about printed +X, hence the minus on `pitchRate`. The rate frame is x forward,
+y left, z up.
 
 ### 6.2 Sign constants
 
 | Constant | Default | Effect | Calibration test |
 | --- | --- | --- | --- |
-| `LEAN_IS_PITCH` | `false` | selects the candidate triad above | T2/T3 |
 | `LEAN_SIGN` | `1f` | flips lean left/right | T2 |
 | `PITCH_SIGN` | `1f` | flips nose up/down | T3 |
 | `YAW_SIGN` | `1f` | flips heading sense | T4 |
-| `YAW_OFFSET_DEG` | `0f` | rotates the heading to the bike's nose | T4 |
+| `YAW_OFFSET_DEG` | `0f` | trims a fixed sensor heading bias | T4 |
 | `ACC_SIGN` | `1f` | flips all three g channels together | T1/T5 |
 | `GYRO_SIGN` | `1f` | flips all three angular rates together | T6 |
 
-`YAW_SIGN` and `YAW_OFFSET_DEG` are applied before `wrap180`:
-
-```
-yawDeg = wrap180(raw.yawDeg * YAW_SIGN + YAW_OFFSET_DEG)
-```
-
-`YAW_OFFSET_DEG` is a **compile-time constant**. Unlike the zero and the mounting switches, it is
-not persisted or editable at runtime; changing it requires rebuilding/reflashing the module.
+`YAW_OFFSET_DEG` is a **compile-time constant**. Unlike the zero and the mount, it is not persisted
+or editable at runtime; changing it requires rebuilding the module. A bracket whose long axis points
+backwards is a mount choice (**Back**), not a heading offset.
 
 `GYRO_SIGN` is one switch for all three rates. If T6 shows a left turn reading a negative yaw rate,
 flip it; the roll and pitch rates follow the same sensor handedness. Do not flip individual rate
-signs to compensate for a swapped axis; change `LEAN_IS_PITCH` instead.
+signs to compensate for a swapped axis.
 
 ### 6.3 Bench tests
 
@@ -318,36 +305,91 @@ signs to compensate for a swapped axis; change `LEAN_IS_PITCH` instead.
 | T1 | bike upright, stationary | vertical g ≈ +1.000 g |
 | T2 | lean the bike right by 15-20° | lean positive, pitch barely moves |
 | T3 | lift the front wheel | pitch positive, lean barely moves |
-| T4 | point the sensor's forward axis at magnetic north, then 90° right | heading ≈ 0°, then ≈ 90° |
+| T4 | point the sensor's printed +Y at magnetic north, then 90° right | heading ≈ 0°, then ≈ 90° |
 | T5 | upright at rest, then push the bike forward | vertical ≈ +1.0 g; forward push gives positive longitudinal g |
 | T6 | on the bench, turn the sensor left by hand (or ride one left turn) | yaw rate positive |
 
-The README's "Calibration checks" section maps each failure to the constant to change. The
-important rule is: if T2 and T3 are swapped, change `LEAN_IS_PITCH`, not `LEAN_SIGN`; the two
-signs belong to different fields. If T6 is inverted, change `GYRO_SIGN`.
+The README's "Calibration checks" section maps each failure to the constant to change. If T2 and T3
+are swapped, the unit's printed axes disagree with the vendor diagram: swap the Pitch/Roll terms in
+`decodeSample` together with WY/WX, then rebuild. Do not flip `LEAN_SIGN` to compensate. If T6 is
+inverted, change `GYRO_SIGN`.
 
-### 6.4 Mounting switches
+### 6.4 Mount position
 
-`Mounting` is the rider's two-switch correction, persisted in `mounting.properties`:
+`MountPosition` is the rider's runtime correction, persisted in `mounting.properties` as `plane`,
+`yaw` and `face`. `plane` is FLAT or VERTICAL.
 
-| Switch | Flips | Does not touch |
-| --- | --- | --- |
-| `flipNose` | pitch, longitudinal g, pitch rate | lean, lateral g, roll rate, yaw, vertical g, yaw rate |
-| `flipSide` | lean, lateral g, roll rate | pitch, longitudinal g, pitch rate, yaw, vertical g, yaw rate |
+- **FLAT** - the sensor lies on its large face. `yaw` is the direction of the printed +Y long axis:
+  FRONT, RIGHT, BACK or LEFT (0°, 90°, 180°, 270° clockwise from the bike's nose). `face` is UP or
+  DOWN, i.e. which side the label is on.
+- **VERTICAL** - the board stands on its edge in the sensor's vertical installation mode, with the
+  printed +Y arrow up. `yaw` is the direction the **label face** looks; `face` must be UP.
 
-`Packet.oriented` applies the signs after the zero:
+`MountPosition.apply` takes the default-frame packet and produces the bike frame. With base fields
+written `lean0`, `nose0`, `longG0`, `latG0`, `rollRate0`, `pitchRate0`, `yawRate0`, `vertG0`:
+
+| Yaw | Face | lean | nose | longG | latG | rollRate | pitchRate | yawRate | vertG |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| FRONT | UP | `lean0` | `nose0` | `longG0` | `latG0` | `rollRate0` | `pitchRate0` | `yawRate0` | `vertG0` |
+| RIGHT | UP | `-nose0` | `lean0` | `-latG0` | `longG0` | `pitchRate0` | `-rollRate0` | `yawRate0` | `vertG0` |
+| BACK | UP | `-lean0` | `-nose0` | `-longG0` | `-latG0` | `-rollRate0` | `-pitchRate0` | `yawRate0` | `vertG0` |
+| LEFT | UP | `nose0` | `-lean0` | `latG0` | `-longG0` | `-pitchRate0` | `rollRate0` | `yawRate0` | `vertG0` |
+| FRONT | DOWN | `lean0` | `-nose0` | `longG0` | `-latG0` | `rollRate0` | `-pitchRate0` | `-yawRate0` | `-vertG0` |
+| RIGHT | DOWN | `nose0` | `lean0` | `latG0` | `longG0` | `-pitchRate0` | `-rollRate0` | `-yawRate0` | `-vertG0` |
+| BACK | DOWN | `-lean0` | `nose0` | `-longG0` | `latG0` | `-rollRate0` | `pitchRate0` | `-yawRate0` | `-vertG0` |
+| LEFT | DOWN | `-nose0` | `-lean0` | `-latG0` | `-longG0` | `pitchRate0` | `rollRate0` | `-yawRate0` | `-vertG0` |
+
+The vertical g is negated with the label down because the sensor's +Z then points at the road. The
+yaw rate is negated for the same reason: it is measured about the sensor's +Z, while the packet's
+yaw rate is defined about true up. The heading is not a vector component, so it gets its own offset:
 
 ```
-leanDeg   = leanDeg   * (flipSide ? -1 : +1)
-pitchDeg  = pitchDeg  * (flipNose ? -1 : +1)
-longG     = longG     * (flipNose ? -1 : +1)
-latG      = latG      * (flipSide ? -1 : +1)
-rollRate  = rollRate  * (flipSide ? -1 : +1)
-pitchRate = pitchRate * (flipNose ? -1 : +1)
+step       = FRONT 0, RIGHT 1, BACK 2, LEFT 3
+mountOffset= face == DOWN ? 180 - 90*step : -90*step
+yawDeg     = wrap180(yaw0 * (face == DOWN ? -1 : +1) + YAW_OFFSET_DEG + mountOffset)
 ```
 
-The heading, vertical g and yaw rate are deliberately left alone: they describe the world, not the
-bracket. The yaw rate is about up, which neither switch changes.
+### 6.5 On-edge mount
+
+The device must be in WitMotion's vertical installation mode (`FF AA 23 01 00`), which requires the
+printed **+Y** arrow to point up. The USB connector is at the **−Y** end, so it is at the bottom in
+this pose. The firmware then reports the **whole packet** - angles, accelerometer and gyro - in a
+virtual flat frame: its +Z is the sensor's +Y (up), and its +Y points opposite the label face. That
+is why the four label directions map to the four flat yaw values turned through 180°
+(`FRONT`↔`BACK`, `RIGHT`↔`LEFT`) and the same flat quarter-turn table applies to every channel.
+
+| Label face | lean | nose | longG | latG | rollRate | pitchRate | yawRate | vertG |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| FRONT | `-lean0` | `-nose0` | `-longG0` | `-latG0` | `-rollRate0` | `-pitchRate0` | `yawRate0` | `vertG0` |
+| RIGHT | `nose0` | `-lean0` | `latG0` | `-longG0` | `-pitchRate0` | `rollRate0` | `yawRate0` | `vertG0` |
+| BACK | `lean0` | `nose0` | `longG0` | `latG0` | `rollRate0` | `pitchRate0` | `yawRate0` | `vertG0` |
+| LEFT | `-nose0` | `lean0` | `-latG0` | `longG0` | `pitchRate0` | `-rollRate0` | `yawRate0` | `vertG0` |
+
+The heading offset follows the label face directly:
+
+```
+labelOffset = FRONT -180, RIGHT +90, BACK 0, LEFT -90
+yawDeg      = wrap180(yaw0 + YAW_OFFSET_DEG + labelOffset)
+```
+
+The useful bench check: with the bike upright and the board on edge, the raw packet should already
+read `vertG0 ≈ +1`, `longG0 ≈ 0`, `latG0 ≈ 0`; after the mount it must still read `vertG ≈ +1`,
+`longG ≈ 0`, `latG ≈ 0`, and `Zero` then works normally. A packet that instead shows gravity on
+`longG` and `vertG ≈ 0` means the firmware is reporting physical sensor axes; that is the old
+behavior that produced “vertical axis reads -0.01 g” and is what this virtual-frame mapping fixes.
+
+A quarter turn maps the axes exactly; no interpolation is involved. Arbitrary angles in any plane,
+and an on-edge mount with the printed +Y pointing down, are deliberately unsupported: the vendor's
+two installation modes assume the flat pose or the +Y-up vertical pose. Changing between flat and
+on-edge rewrites the installation direction - a flash-backed setting - so the module sends unlock,
+`FF AA 23 <mode> 00` and save when the link is up, or marks the setup incomplete so the next
+connection does it.
+
+> **Bench note.** The virtual-frame convention above follows from the vendor's vertical installation
+> (rotate 90° about X, +Y up); it is not a value the module can read back. If a unit's vertical mode
+> turns out to report the angles or vectors in a different frame, the symptom is swapped or inverted
+> lean/nose, or gravity on the wrong axis in the on-edge rows. The mapping lives in
+> `MountPosition.applyVertical`, which now applies the flat virtual mapping to the whole packet.
 
 ## 7. Processing math
 
@@ -371,15 +413,19 @@ This is a **magnetic** bearing; the module never subtracts declination.
 - total gravity `sqrt(longG² + latG² + vertG²)` is between 0.7 g and 1.3 g, and
 - the vertical axis reads at least 0.5 g in magnitude (`abs(vertG) >= 0.5`).
 
-`zeroRefusal` returns a rider-readable reason for either refusal. The current magnitude check also
-accepts an upside-down sensor (vertical ≈ -1 g); see the review notes.
+`zeroRefusal` returns a rider-readable reason for either refusal. The magnitude check deliberately
+accepts a negative vertical g. In normal use the mount has already been applied by the time the
+sample reaches `Zero.of`, so a correctly fitted face-down sensor reads +1 g; the `abs()` tolerance
+only matters when the rider has not yet selected the right mount face.
 
-The captured zero stores the lean and pitch readings and the three g components, all in the raw
-decoded packet's coordinate frame (before the mounting switches).
+The captured zero stores the lean and pitch readings and the three g components in the **mounted
+bike frame** - after `MountPosition.apply`, before any offset is subtracted. It is persisted with
+the mount that produced it; changing the mount clears it.
 
 ### 7.3 Applying the zero
 
-The angles are a **plain offset**, not a rotation:
+The packet reaching `Zero.apply` has already been through the mount. The angles are a **plain
+offset**, not a rotation:
 
 ```
 leanDeg  = packet.leanDeg  - zero.leanDeg
@@ -448,13 +494,13 @@ A parked bike reads lean 4°, pitch -1°, vertical 0.99 g. Capturing that zero s
 gives lean 15°, pitch 3°. This is exactly the behaviour asserted by
 `zeroSubtractsTheBracketTiltAsAPlainOffset`.
 
-A sample with raw candidate-B channels `ax = 0.10 g`, `ay = -0.20 g`, `az = 0.97 g` maps to
-`longG = +0.10 g`, `latG = +0.20 g`, `vertG = +0.97 g` before any zero or mounting correction.
+A sample with raw channels `ax = 0.10 g`, `ay = -0.20 g`, `az = 0.97 g` maps, in the default mount,
+to `longG = -0.20 g`, `latG = +0.10 g`, `vertG = +0.97 g` before any zero or mount rotation.
 
-A raw gyro reading `wx = 10 °/s`, `wy = -20 °/s`, `wz = 30 °/s` maps, with candidate B and
-`GYRO_SIGN = 1`, to `rollRate = 10 °/s`, `pitchRate = -20 °/s`, `yawRate = 30 °/s`, all converted
-to radians per second. The sign convention follows the right-hand rule about forward, left and up:
-positive roll leans right, positive pitch sends the nose down, positive yaw turns left.
+A raw gyro reading `wx = 10 °/s`, `wy = -20 °/s`, `wz = 30 °/s` maps, with `GYRO_SIGN = 1`, to
+`rollRate = -20 °/s`, `pitchRate = -10 °/s`, `yawRate = 30 °/s`, all converted to radians per second.
+The sign convention follows the right-hand rule about forward, left and up: positive roll leans
+right, positive pitch sends the nose down, positive yaw turns left.
 
 ## 8. Failure modes and limits
 
@@ -486,6 +532,6 @@ positive roll leans right, positive pitch sends the nose down, positive yaw turn
 - **The heading is magnetic.** The sensor's 9-axis fusion produces it; the module never derives a
   heading from raw `Hx`/`Hy`, and never applies declination.
 - **Angular rates are the sensor's own.** The module does not integrate them; it only converts
-  °/s to rad/s, applies `GYRO_SIGN`, levels them with the zero rotation and applies the mounting
-  switches. MOTO-HUB consumes them as `rollRateRadiansPerSecond`, `pitchRateRadiansPerSecond` and
+  °/s to rad/s, applies `GYRO_SIGN`, applies the mount rotation and levels them with the zero.
+  MOTO-HUB consumes them as `rollRateRadiansPerSecond`, `pitchRateRadiansPerSecond` and
   `yawRateRadiansPerSecond`.
