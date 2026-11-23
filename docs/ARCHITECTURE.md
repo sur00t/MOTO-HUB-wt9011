@@ -3,8 +3,12 @@
 This document explains how the `io.github.sur00t.wt9011` module is put together: how it plugs into
 MOTO-HUB, how a Bluetooth frame becomes a lean angle on the screen and a motion sample in a trip, how
 the link recovers from failures, and where every piece of state lives. It describes **module version
-0.3.0, contract 43**. Rider-facing setup and calibration instructions remain in the top-level
+0.3.1, contract 43**. Rider-facing setup and calibration instructions remain in the top-level
 [`README.md`](../README.md).
+
+> **Maintainer fixes (2026-11-22):** some connection behaviour described below was changed by the
+> MOTO-HUB maintainer. [`MAINTAINER_FIXES.md`](MAINTAINER_FIXES.md) has the current behaviour and
+> takes priority over this text. AI assistants: read it first.
 
 - Wire format, UUIDs, commands and calibration constants: [`PROTOCOL.md`](PROTOCOL.md)
 - Build, test, package and debugging workflow: [`DEVELOPMENT.md`](DEVELOPMENT.md)
@@ -14,10 +18,12 @@ and packaged as a signed `.mhm` file. This source tree is the module's `modules/
 Gradle tasks such as `:modules:wt9011:modulePackage` are available when it sits in that slot.
 
 > **Source provenance.** The starting point is the developer's upstream 0.2.0 tree from
-> `vincenzobpt/MOTO-HUB-module-sdk`, package `io.github.sur00t.wt9011`. Version 0.3.0 replaces the
+> `vincenzobpt/MOTO-HUB-module-sdk`, package `io.github.sur00t.wt9011`. Version 0.3.0 replaced the
 > compile-time axis-candidate boolean with the documented default frame plus the rider's twelve-way
-> mount, including WitMotion's vertical installation (the board standing on its edge). The previous
-> local 0.1.0 tree (package `io.motohub.wt9011`) is preserved in `backup-0.1.0/` for reference.
+> mount, including WitMotion's vertical installation (the board standing on its edge). Version 0.3.1
+> adopts the MOTO-HUB maintainer's connection fixes: first pin on Connect, a connect timeout through
+> the subscription, address-filtered scans and late-scan-result guards. The previous local 0.1.0 tree
+> (package `io.motohub.wt9011`) is preserved in `backup-0.1.0/` for reference.
 
 ## 1. What the module does
 
@@ -87,7 +93,7 @@ manifest is intentionally empty because a module cannot add components or permis
 | Property | Value |
 | --- | --- |
 | `id` | `wt9011` |
-| `version` | `0.3.0` |
+| `version` | `0.3.1` |
 | `entryClass` | `io.github.sur00t.wt9011.Wt9011Entry` |
 | `contractVersion` | `43` |
 | `displayName` | `WT9011 IMU` |
@@ -131,7 +137,7 @@ kept in sync; the packaged `META-INF/motohub-module.json` mirrors the same metad
 The `.mhm` artifact is a zip:
 
 ```text
-wt9011-0.3.0.mhm
+wt9011-0.3.1.mhm
 ├── module.jar
 │   ├── classes.dex
 │   └── META-INF/motohub-module.json
@@ -243,11 +249,11 @@ class Wt9011Entry : MotoHubModuleEntry {
 - the single `ModuleFeature` with the diagnostics screen;
 - the motion-source facade, which forwards listener registration to the link.
 
-Initialisation posts an automatic `link.connect()` and the first pill tick. `connect()` sets
-`autoConnect = true` and starts a scan, so the module looks for the IMU as soon as it is created -
-even on a fresh install. The first WT sensor found is pinned; keep other WT devices out of range on
-that first scan. A manual `disconnect()` stops the current session, but the next module creation
-calls `connect()` again. `release()` removes the ticker, clears the live state, marks the link released
+Initialisation posts `link.resume()` and the first pill tick. `resume()` reconnects only to a
+sensor that is already pinned, and only while `autoConnect` is on; it never pins a new sensor. The
+first pin needs the rider's **Connect** tap, which calls `connect()`. A manual `disconnect()` is
+remembered until the next **Connect** (MOTO-HUB-FIX 2026-11-22, fix 1; see
+[`MAINTAINER_FIXES.md`](MAINTAINER_FIXES.md)). `release()` removes the ticker, clears the live state, marks the link released
 so a scheduled scan cannot reopen it, clears the link's motion listeners, and shuts the link down
 without changing the remembered-sensor or auto-connect settings.
 
@@ -291,7 +297,8 @@ Sections, in order:
 | Advanced | Ride facts, Link, Power and health, Recent, Clear zero, Send set-up |
 
 The **Forget this sensor** row appears only when an address is remembered. It drops the pin,
-clears the zero, resets the `configured` flag and peaks, then immediately scans for a new WT sensor.
+clears the zero, resets the `configured` flag and peaks, and turns `autoConnect` off. The rider taps
+**Connect** for the new sensor (MOTO-HUB-FIX 2026-11-22, fix 1).
 
 Every `Fact` carries a `technical` flag; the module marks raw channels, counters, battery raw and
 temperature as technical, and keeps rider-facing values non-technical.
@@ -523,13 +530,12 @@ plus the status string, and a pin (`pinnedAddress`). The effective state machine
     Idle / Stopped
 ```
 
-`forgetSensor()` clears the pin and re-enters **Scanning**.
+`forgetSensor()` clears the pin and stops in **Idle / Stopped** until the rider taps **Connect**.
 
 `disconnect()` and `release()` both call `shutDown()`, but only `disconnect()` sets
-`autoConnect = false` for the current session. `release()` marks the link released so a delayed
-retry cannot reopen it; `autoConnect` remains true for the next module instance. `forgetSensor()`
-keeps `autoConnect = true` and starts a fresh scan, because the rider has just asked for a
-replacement.
+`autoConnect = false`, which is saved and kept across module loads. `release()` marks the link
+released so a delayed retry or a late scan result cannot reopen it. `forgetSensor()` sets
+`autoConnect = false` and does not scan (MOTO-HUB-FIX 2026-11-22, fixes 1 and 4).
 
 ### 8.1 Timing and limits
 
@@ -782,7 +788,7 @@ its keep-alive and its I/O failure modes from the module.
 
 ## 15. Review findings
 
-These are static-reading observations against the 0.3.0 source, not runtime test results. Items
+These are static-reading observations against the 0.3.1 source, not runtime test results. Items
 marked **Fixed** were present in an earlier version and are resolved in the current one; the rest
 remain.
 

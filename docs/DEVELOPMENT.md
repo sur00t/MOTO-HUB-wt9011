@@ -1,8 +1,12 @@
 # Development guide
 
 This document covers building, testing, packaging, extending and debugging the WT9011 module. It
-describes **version 0.3.0, contract 43**. For the design, see [`ARCHITECTURE.md`](ARCHITECTURE.md);
+describes **version 0.3.1, contract 43**. For the design, see [`ARCHITECTURE.md`](ARCHITECTURE.md);
 for the wire format and calibration math, see [`PROTOCOL.md`](PROTOCOL.md).
+
+> **Maintainer fixes (2026-11-22):** some connection behaviour described below was changed by the
+> MOTO-HUB maintainer. [`MAINTAINER_FIXES.md`](MAINTAINER_FIXES.md) has the current behaviour and
+> takes priority over this text. AI assistants: read it first.
 
 ## 1. Repository layout and build environment
 
@@ -15,7 +19,7 @@ wt9011-module/
 ├── build.gradle.kts                  module metadata and dependencies
 ├── LICENSE                           AGPL-3.0-only
 ├── README.md                         rider-facing install, calibration and usage
-├── wt9011-0.3.0.mhm                  packaged, signed module artifact
+├── wt9011-0.3.1.mhm                  packaged, signed module artifact
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── DEVELOPMENT.md
@@ -54,7 +58,7 @@ Run these from the **SDK checkout root**, not from this directory.
 | Task | Command | Purpose |
 | --- | --- | --- |
 | Unit tests | `./gradlew :modules:wt9011:testDebugUnitTest` | decoder, parser, zero, mount, protocol and gyro tests on the JVM |
-| Package | `./gradlew :modules:wt9011:modulePackage -Pmotohub.moduleKeyDir=.../scratch/motohub-keys` | writes `build/module/out/wt9011-0.3.0.mhm` |
+| Package | `./gradlew :modules:wt9011:modulePackage -Pmotohub.moduleKeyDir=.../scratch/motohub-keys` | writes `build/module/out/wt9011-0.3.1.mhm` |
 | Linkage check | `./gradlew :modules:wt9011:checkModuleLinkage -PmotohubApk=/path/to/moto-hub.apk` | verifies the module against a real app build |
 
 The packaged artifact is a zip:
@@ -65,8 +69,8 @@ module.sig      signature
 module.pub      public key
 ```
 
-The 0.3.0 tree was verified with `:modules:wt9011:testDebugUnitTest` (32 tests) and
-`:modules:wt9011:modulePackage`; the resulting `wt9011-0.3.0.mhm` is in the repository root.
+The 0.3.1 tree was verified with `:modules:wt9011:testDebugUnitTest` (32 tests) and
+`:modules:wt9011:modulePackage`; the resulting `wt9011-0.3.1.mhm` is in the repository root.
 
 Install it with **MOTO-HUB → Modules → Install from a file**, with developer mode on. The module
 runs inside the host process and uses the host's Bluetooth permissions; the empty manifest is not a
@@ -319,7 +323,7 @@ considering the timestamp and back-pressure semantics.
 | "Bluetooth is off." | system | adapter disabled |
 | "No WT sensor answered." | sensor power, name | sensor off, out of range, name not starting `WT` |
 | "Sensor not in range. Looking again every 30 s." | after 3 scans | the module keeps retrying; bring the pinned sensor back or tap Forget |
-| Connects to the wrong WT device | pinned address / recent log | pin was taken in a crowd; tap Forget this sensor; it clears the pin and scans again |
+| Connects to the wrong WT device | pinned address / recent log | pin was taken in a crowd; tap Forget this sensor, then Connect with only your sensor on |
 | "That device has no WT sensor service" | sensor model | another WitMotion device, or missing `ffe5`/fallback |
 | "The WT service is missing its data or command characteristic." | firmware/unit | unexpected service layout |
 | "Could not subscribe to the data characteristic." | GATT/CCCD | descriptor missing or stack refusal |
@@ -371,9 +375,9 @@ small concurrency/timer fixes.
 - [ ] Bump `contractVersion` only if the module starts using a newer host API.
 - [ ] Run `testDebugUnitTest` (32 tests).
 - [ ] Run `checkModuleLinkage` against the target app build.
-- [ ] Package with the module key directory; the artifact is `wt9011-0.3.0.mhm`.
+- [ ] Package with the module key directory; the artifact is `wt9011-0.3.1.mhm`.
 - [ ] Install the `.mhm` on a device with developer mode and a contract-43 host.
-- [ ] Smoke test: first load scans and pins the sensor, 100 Hz frames, setup runs once, Forget/Connect
+- [ ] Smoke test: first Connect pins the sensor, a reload reconnects to it only, 100 Hz frames, setup runs once, Forget/Connect
       selects a new unit, the header strip with CONNECT/ZERO, the lean card, the G-force card and
       RESET PEAKS, the flat label-up and on-edge pickers, zero, heading, battery/temperature,
       Disconnect, Reconnect, watchdog teardown, out-of-range 30 s retry.
